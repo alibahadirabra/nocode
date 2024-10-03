@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager, suppress
 from time import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, Union
 
 from pypika.dialects import MySQLQueryBuilder, PostgreSQLQueryBuilder
 
@@ -52,6 +52,15 @@ SQL_ITERATOR_BATCH_SIZE = 100
 TRANSACTION_DISABLED_MSG = """Commit/rollback are disabled during certain events. This command will
 be ignored. Commit/Rollback from here WILL CAUSE very hard to debug problems with atomicity and
 concurrent data update bugs."""
+
+
+class Stringer(Protocol):
+	def __str__(self) -> str:
+		...
+
+
+Stringable: TypeAlias = str | Stringer
+StringableOrDict: TypeAlias = str | Stringer | dict[str, Any]
 
 
 class Database:
@@ -478,7 +487,7 @@ class Database:
 		self,
 		doctype,
 		filters=None,
-		fieldname="name",
+		fieldname: Stringable = "name",
 		ignore=None,
 		as_dict=False,
 		debug=False,
@@ -557,7 +566,7 @@ class Database:
 		self,
 		doctype,
 		filters=None,
-		fieldname="name",
+		fieldname: Stringable = "name",
 		ignore=None,
 		as_dict=False,
 		debug=False,
@@ -775,10 +784,10 @@ class Database:
 
 	@staticmethod
 	def _get_update_dict(
-		fieldname: str | dict, value: Any, *, modified: str, modified_by: str, update_modified: bool
+		fieldname: StringableOrDict, value: Any, *, modified: str, modified_by: str, update_modified: bool
 	) -> dict[str, Any]:
 		"""Create update dict that represents column-values to be updated."""
-		update_dict = fieldname if isinstance(fieldname, dict) else {fieldname: value}
+		update_dict = fieldname if isinstance(fieldname, dict) else {str(fieldname): value}
 
 		if update_modified:
 			modified = modified or now()
@@ -790,7 +799,7 @@ class Database:
 	def set_single_value(
 		self,
 		doctype: str,
-		fieldname: str | dict,
+		fieldname: StringableOrDict,
 		value: str | int | None = None,
 		*,
 		modified=None,
@@ -825,7 +834,7 @@ class Database:
 		if doctype in self.value_cache:
 			del self.value_cache[doctype]
 
-	def get_single_value(self, doctype, fieldname, cache=True):
+	def get_single_value(self, doctype, fieldname: Stringable, cache=True):
 		"""Get property of Single DocType. Cache locally by default
 
 		:param doctype: DocType of the single object whose value is requested
@@ -837,6 +846,7 @@ class Database:
 		        company = frappe.db.get_single_value('Global Defaults', 'default_company')
 		"""
 
+		fieldname = str(fieldname)
 		if doctype not in self.value_cache:
 			self.value_cache[doctype] = {}
 
@@ -940,7 +950,7 @@ class Database:
 		self,
 		dt,
 		dn,
-		field,
+		field: StringableOrDict,
 		val=None,
 		modified=None,
 		modified_by=None,
