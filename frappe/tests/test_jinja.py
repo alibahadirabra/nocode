@@ -1,12 +1,13 @@
 import sys
 import unittest
 from collections.abc import Iterable
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import frappe
 from frappe import _dict, scrub
 from frappe.custom.doctype.custom_field.custom_field import create_custom_field
 from frappe.model.document import Document, DocumentProxy
+from frappe.tests.utils import FrappeTestCase
 from frappe.utils.jinja import process_context, render_template
 
 
@@ -250,7 +251,14 @@ class TestProcessContext(unittest.TestCase):
 	def test_process_context_completion(self):
 		context = {"doc": self.mock_doc, "value": "test", "list": [1, 2, 3], "dict": {"key": "value"}}
 
+		# Reset the call count before running the function
+		self.mock_get_meta.reset_mock()
 		completion_list = process_context(context, for_code_completion=True)
+		# Assert that get_meta was called exactly three times with the correct doctypes
+		self.assertEqual(self.mock_get_meta.call_count, 3)
+		self.mock_get_meta.assert_has_calls(
+			[call("Test DocType"), call("Linked DocType"), call("User")], any_order=True
+		)
 		expected_items = [
 			{"value": "doc.test_field", "score": 6, "meta": "ctx"},
 			{"value": "doc.link_field.test_field", "score": 6, "meta": "ctx"},
@@ -456,7 +464,7 @@ def run_specific_test(test_class, test_case=None):
 	runner.run(suite)
 
 
-class TestRenderTemplateIntegration(unittest.TestCase):
+class TestRenderTemplateIntegration(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
 		# Create child doctypes first
@@ -705,7 +713,7 @@ class TestRenderTemplateIntegration(unittest.TestCase):
 		self.assertEqual(result.strip(), expected_output.strip())
 
 
-class TestRenderTemplateWithGlobals(unittest.TestCase):
+class TestRenderTemplateWithGlobals(FrappeTestCase):
 	def test_render_template_with_globals(self):
 		# Create DocumentProxy instances
 		user = DocumentProxy("User", "Administrator")
@@ -741,7 +749,7 @@ class TestRenderTemplateWithGlobals(unittest.TestCase):
 		self.assertIn("administrator", result)
 
 
-class TestDocumentProxyRendering(unittest.TestCase):
+class TestDocumentProxyRendering(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
 		# Create test users
@@ -815,12 +823,23 @@ class TestDocumentProxyRendering(unittest.TestCase):
 		self.assertEqual(result, "Admin: Administrator, Test: test_render@example.com")
 
 
+def get_test_classes():
+	return [
+		cls
+		for name, cls in globals().items()
+		if isinstance(cls, type)
+		and issubclass(cls, unittest.TestCase)
+		and not issubclass(cls, FrappeTestCase)
+	]
+
+
 if __name__ == "__main__":
 	# Mock Frappe environment
 	frappe.conf = Mock()
 	frappe.conf.developer_mode = False
 	frappe.local = Mock()
 	frappe.local.site = "test_site"
+
 	if len(sys.argv) > 1:
 		test_class_name = sys.argv[1]
 		test_case_name = sys.argv[2] if len(sys.argv) > 2 else None
@@ -831,7 +850,16 @@ if __name__ == "__main__":
 			print(f"Test class '{test_class_name}' not found.")
 			sys.exit(1)
 
+		if issubclass(test_class, FrappeTestCase):
+			print(f"Skipping FrappeTestCase: {test_class_name}")
+			sys.exit(0)
+
 		run_specific_test(test_class, test_case_name)
 	else:
-		# Run all tests
-		unittest.main()
+		# Run all tests except FrappeTestCase instances
+		suite = unittest.TestSuite()
+		for test_class in get_test_classes():
+			suite.addTest(unittest.makeSuite(test_class))
+
+		runner = unittest.TextTestRunner(verbosity=2)
+		runner.run(suite)
