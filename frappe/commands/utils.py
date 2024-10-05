@@ -769,6 +769,12 @@ def transform_database(context: CliCtxObj, table, engine, row_format, failfast):
 @click.option(
 	"--failfast", is_flag=True, default=False, help="Stop the test run on the first error or failure"
 )
+@click.option(
+	"--test-category",
+	type=click.Choice(["unit", "integration", "all"]),
+	default="all",
+	help="Select test category to run",
+)
 @pass_context
 def run_tests(
 	context: CliCtxObj,
@@ -785,6 +791,7 @@ def run_tests(
 	skip_before_tests=False,
 	failfast=False,
 	case=None,
+	test_category="all",
 	pdb=False,
 ):
 	"""Run python unit-tests"""
@@ -809,7 +816,7 @@ def run_tests(
 			click.secho(f"bench --site {site} set-config allow_tests true", fg="green")
 			return
 
-		ret = frappe.test_runner.main(
+		unit_ret, integration_ret = frappe.test_runner.main(
 			site,
 			app,
 			module,
@@ -826,11 +833,18 @@ def run_tests(
 			skip_test_records=skip_test_records,
 			skip_before_tests=skip_before_tests,
 			pdb_on_exceptions=pdb_on_exceptions,
+			selected_categories=[] if test_category == "all" else test_category,
 		)
 
-		if len(ret.failures) == 0 and len(ret.errors) == 0:
+		if (
+			len(unit_ret.failures) == 0
+			and len(unit_ret.errors) == 0
+			and len(integration_ret.failures) == 0
+			and len(integration_ret.errors) == 0
+		):
 			ret = 0
-
+		else:
+			ret = (unit_ret, integration_ret)
 		if os.environ.get("CI"):
 			sys.exit(ret)
 
@@ -868,13 +882,14 @@ def run_parallel_tests(
 		else:
 			from frappe.parallel_test_runner import ParallelTestRunner
 
-			ParallelTestRunner(
+			runner = ParallelTestRunner(
 				app,
 				site=site,
 				build_number=build_number,
 				total_builds=total_builds,
 				dry_run=dry_run,
 			)
+			runner.setup_and_run()
 
 
 @click.command(
