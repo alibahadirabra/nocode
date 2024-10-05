@@ -5,7 +5,7 @@ import json
 import time
 from collections.abc import Generator, Iterable
 from contextlib import contextmanager
-from functools import wraps
+from functools import cache, singledispatchmethod, wraps
 from typing import TYPE_CHECKING, Any, Literal, Optional, TypeAlias, Union, overload
 
 from werkzeug.exceptions import NotFound
@@ -20,7 +20,7 @@ from frappe.model import optional_fields, table_fields
 from frappe.model.base_document import BaseDocument, get_controller
 from frappe.model.docstatus import DocStatus
 from frappe.model.naming import set_new_name, validate_name
-from frappe.model.utils import is_virtual_doctype
+from frappe.model.utils import is_virtual_doctype, simple_singledispatch
 from frappe.model.workflow import set_workflow_state_on_action, validate_workflow
 from frappe.types import DF
 from frappe.utils import compare, cstr, date_diff, file_lock, flt, now
@@ -37,7 +37,21 @@ DOCUMENT_LOCK_EXPIRTY = 12 * 60 * 60  # All locks expire in 12 hours automatical
 DOCUMENT_LOCK_SOFT_EXPIRY = 60 * 60  # Let users force-unlock after 60 minutes
 
 
-def get_doc(*args, **kwargs):
+class DocRef:
+	"""A lightweight reference to a document, containing just the doctype and name."""
+
+	def __init__(self, doctype: str, name: str):
+		self.doctype = doctype
+		self.name = name
+
+	def __str__(self):
+		# ! Used in frappe's query engine in frappe/database/query.py
+		# ! Keep it stable
+		return self.name
+
+
+@simple_singledispatch
+def get_doc(*args, **kwargs) -> "Document":
 	"""Return a `frappe.model.Document` object.
 
 	:param arg1: Document dict or DocType name.
@@ -64,31 +78,40 @@ def get_doc(*args, **kwargs):
 	        # select a document for update
 	        user = get_doc("User", "test@example.com", for_update=True)
 	"""
-	if args:
-		if isinstance(args[0], BaseDocument):
-			# already a document
-			return args[0]
-		elif isinstance(args[0], str):
-			doctype = args[0]
+	if not args and kwargs:
+		return get_doc_from_dict(kwargs)
+	else:
+		raise ValueError("First non keyword argument must be a string, dict or DocRef")
 
-		elif isinstance(args[0], dict):
-			# passed a dict
-			kwargs = args[0]
 
-		else:
-			raise ValueError("First non keyword argument must be a string or dict")
+@get_doc.register(BaseDocument)
+def _basedoc(doc: BaseDocument, *args, **kwargs) -> "Document":
+	return doc
 
-	if len(args) < 2 and kwargs:
-		if "doctype" in kwargs:
-			doctype = kwargs["doctype"]
-		else:
-			raise ValueError('"doctype" is a required key')
 
+@get_doc.register(DocRef)
+def _docref(doc_ref: DocRef, **kwargs) -> "Document":
+	return get_doc(doc_ref.doctype, doc_ref.name, **kwargs)
+
+
+@get_doc.register(str)
+def get_doc_str(doctype: str, name: str | None = None, **kwargs) -> "Document":
+	# if no name: it's a single
 	controller = get_controller(doctype)
 	if controller:
-		return controller(*args, **kwargs)
+		return controller(doctype, name, **kwargs)
 
 	raise ImportError(doctype)
+
+
+@get_doc.register(dict)
+def get_doc_from_dict(data: dict[str, Any], **kwargs) -> "Document":
+	if "doctype" not in data:
+		raise ValueError('"doctype" is a required key')
+	controller = get_controller(data["doctype"])
+	if controller:
+		return controller(**data)
+	raise ImportError(data["doctype"])
 
 
 @contextmanager
@@ -146,7 +169,97 @@ def read_only_document(context=None):
 			del frappe.local.read_only_depth
 
 
-class Document(BaseDocument):
+class DocumentProxy(DocRef):
+	def __init__(self, doctype, name):
+		super().__init__(doctype, name)
+		self._doc = None
+
+	@classmethod
+	@cache
+	def _get_fields(cls, doctype):
+		from frappe.model import data_fieldtypes, default_fields, table_fields
+		from frappe.model.meta import get_default_df
+
+		meta = frappe.get_meta(doctype)
+
+		return {
+			# all meta fields with values
+			f.fieldname: f
+			for f in meta.fields
+			if f.fieldtype in (*data_fieldtypes, *table_fields)
+		} | {
+			# all default fields
+			f.fieldname: f
+			for f in (get_default_df(n) for n in default_fields)
+		}
+
+	@property
+	def _fieldnames(self):
+		return self._get_fields(self.doctype).keys()
+
+	def _fields(self, fieldname):
+		return self._get_fields(self.doctype)[fieldname]
+
+	def __getattr__(self, attr):
+		if attr in self._fieldnames:
+			value = None
+			if self.name:
+				if self._doc is None:
+					self._doc = frappe.get_doc(self.doctype, self.name)
+				value = self._doc.get(attr)
+			field = self._fields(attr)
+			if field.fieldtype == "Link":
+				linked_doctype = field.options
+				return DocumentProxy(linked_doctype, value)
+			if field.fieldtype == "Dynamic Link":
+				linked_doctype = self._doc.get(field.options)
+				return DocumentProxy(linked_doctype, value)
+			if field.fieldtype in ("Table", "Table MultiSelect"):
+				linked_doctype = field.options
+				return DocumentProxyList(linked_doctype, value)
+
+			return value
+		raise AttributeError(f"'{self.doctype}' object proxy has no attribute '{attr}'")
+
+	def __getitem__(self, key):
+		return self.__getattr__(key)
+
+	def __contains__(self, key):
+		return key in self._fieldnames
+
+	def __repr__(self):
+		return f"{self.__class__.__name__}({self.doctype}, {self.name})"
+
+	def __str__(self):
+		return self.name or self.__repr__()
+
+	def __bool__(self):
+		return bool(self.name)
+
+
+class DocumentProxyList:
+	def __init__(self, doctype, values):
+		self.doctype = doctype
+		self.values = values
+
+	def __iter__(self):
+		for value in self.values:
+			yield DocumentProxy(self.doctype, value.name)
+
+	def __getitem__(self, index):
+		return DocumentProxy(self.doctype, self.values[index].name)
+
+	def __len__(self):
+		return len(self.values)
+
+	def __str__(self):
+		return f"{self.__class__.__name__}({self.doctype}, {len(self)} items)"
+
+	def __repr__(self):
+		return self.__str__()
+
+
+class Document(BaseDocument, DocRef):
 	"""All controllers inherit from `Document`."""
 
 	doctype: DF.Data
@@ -161,7 +274,7 @@ class Document(BaseDocument):
 	def __init__(self, *args, **kwargs):
 		"""Constructor.
 
-		:param arg1: DocType name as string or document **dict**
+		:param arg1: DocType name as string, document **dict**, or DocRef object
 		:param arg2: Document name, if `arg1` is DocType name.
 
 		If DocType name and document name are passed, the object will load
@@ -170,34 +283,47 @@ class Document(BaseDocument):
 		self.doctype = None
 		self.name = None
 		self.flags = frappe._dict()
-
-		if args and args[0]:
-			if isinstance(args[0], str):
-				# first arugment is doctype
-				self.doctype = args[0]
-
-				# doctype for singles, string value or filters for other documents
-				self.name = self.doctype if len(args) == 1 else args[1]
-
-				# for_update is set in flags to avoid changing load_from_db signature
-				# since it is used in virtual doctypes and inherited in child classes
-				self.flags.for_update = kwargs.get("for_update")
-				self.load_from_db()
-				return
-
-			if isinstance(args[0], dict):
-				# first argument is a dict
-				kwargs = args[0]
-
-		if kwargs:
-			# init base document
-			super().__init__(kwargs)
-			self.init_child_tables()
-			self.init_valid_columns()
+		if args:
+			self._init_dispatch(args[0], *args[1:], **kwargs)
+		elif kwargs:
+			self._init_from_kwargs(kwargs)
 
 		else:
-			# incorrect arguments. let's not proceed.
 			raise ValueError("Illegal arguments")
+
+	def _init_from_kwargs(self, kwargs):
+		super().__init__(kwargs)
+		self.init_child_tables()
+		self.init_valid_columns()
+
+	def _init_known_doc(self, doctype, name, **kwargs):
+		self.doctype = doctype
+		self.name = name
+		# for_update is set in flags to avoid changing load_from_db signature
+		# since it is used in virtual doctypes and inherited in child classes
+		self.flags.for_update = kwargs.get("for_update")
+		self.load_from_db()
+		if kwargs:  # ad-hoc overrides
+			self._init_from_kwargs(kwargs)
+
+	@singledispatchmethod
+	def _init_dispatch(self, arg, *args, **kwargs):
+		raise ValueError(f"Unsupported argument type: {type(arg)}")
+
+	@_init_dispatch.register(str)
+	def _init_str(self, doctype, *args, **kwargs):
+		# use doctype as name for single
+		name = doctype if not args else args[0]
+		self._init_known_doc(doctype, name, **kwargs)
+
+	@_init_dispatch.register(DocRef)
+	def _init_docref(self, doc_ref, **kwargs):
+		self._init_known_doc(doc_ref.doctype, doc_ref.name, **kwargs)
+
+	@_init_dispatch.register(dict)
+	def _init_dict(self, arg_dict, **kwargs):
+		# discard any further keyword args
+		self._init_from_kwargs(arg_dict)
 
 	@property
 	def is_locked(self):

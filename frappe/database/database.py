@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager, suppress
 from time import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, Union
 
 from pypika.dialects import MySQLQueryBuilder, PostgreSQLQueryBuilder
 
@@ -28,6 +28,7 @@ from frappe.database.utils import (
 	is_query_type,
 )
 from frappe.exceptions import DoesNotExistError, ImplicitCommitError
+from frappe.model.document import DocRef
 from frappe.monitor import get_trace_id
 from frappe.query_builder.functions import Count
 from frappe.utils import CallbackManager, cint, get_datetime, get_table_name, getdate, now, sbool
@@ -51,6 +52,15 @@ SQL_ITERATOR_BATCH_SIZE = 100
 TRANSACTION_DISABLED_MSG = """Commit/rollback are disabled during certain events. This command will
 be ignored. Commit/Rollback from here WILL CAUSE very hard to debug problems with atomicity and
 concurrent data update bugs."""
+
+
+class Stringer(Protocol):
+	def __str__(self) -> str:
+		...
+
+
+Stringable: TypeAlias = str | Stringer
+StringableOrDict: TypeAlias = str | Stringer | dict[str, Any]
 
 
 class Database:
@@ -477,7 +487,7 @@ class Database:
 		self,
 		doctype,
 		filters=None,
-		fieldname="name",
+		fieldname: Stringable = "name",
 		ignore=None,
 		as_dict=False,
 		debug=False,
@@ -556,7 +566,7 @@ class Database:
 		self,
 		doctype,
 		filters=None,
-		fieldname="name",
+		fieldname: Stringable = "name",
 		ignore=None,
 		as_dict=False,
 		debug=False,
@@ -592,8 +602,11 @@ class Database:
 		        user = frappe.db.get_values("User", "test@example.com", "*")[0]
 		"""
 		out = None
-		if cache and isinstance(filters, str) and (doctype, filters, fieldname) in self.value_cache:
-			return self.value_cache[(doctype, filters, fieldname)]
+		cache_key = None
+		if cache and isinstance(filters, str | DocRef):
+			cache_key = (doctype, str(filters), fieldname)
+			if cache_key in self.value_cache:
+				return self.value_cache[cache_key]
 
 		if distinct:
 			order_by = None
@@ -661,8 +674,8 @@ class Database:
 					fields, filters, doctype, as_dict, debug, update, run=run, pluck=pluck, distinct=distinct
 				)
 
-		if cache and isinstance(filters, str):
-			self.value_cache[(doctype, filters, fieldname)] = out
+		if cache and cache_key:
+			self.value_cache[cache_key] = out
 
 		return out
 
@@ -771,10 +784,10 @@ class Database:
 
 	@staticmethod
 	def _get_update_dict(
-		fieldname: str | dict, value: Any, *, modified: str, modified_by: str, update_modified: bool
+		fieldname: StringableOrDict, value: Any, *, modified: str, modified_by: str, update_modified: bool
 	) -> dict[str, Any]:
 		"""Create update dict that represents column-values to be updated."""
-		update_dict = fieldname if isinstance(fieldname, dict) else {fieldname: value}
+		update_dict = fieldname if isinstance(fieldname, dict) else {str(fieldname): value}
 
 		if update_modified:
 			modified = modified or now()
@@ -786,7 +799,7 @@ class Database:
 	def set_single_value(
 		self,
 		doctype: str,
-		fieldname: str | dict,
+		fieldname: StringableOrDict,
 		value: str | int | None = None,
 		*,
 		modified=None,
@@ -821,7 +834,7 @@ class Database:
 		if doctype in self.value_cache:
 			del self.value_cache[doctype]
 
-	def get_single_value(self, doctype, fieldname, cache=True):
+	def get_single_value(self, doctype, fieldname: Stringable, cache=True):
 		"""Get property of Single DocType. Cache locally by default
 
 		:param doctype: DocType of the single object whose value is requested
@@ -833,11 +846,12 @@ class Database:
 		        company = frappe.db.get_single_value('Global Defaults', 'default_company')
 		"""
 
+		fieldname = str(fieldname)
 		if doctype not in self.value_cache:
 			self.value_cache[doctype] = {}
 
-		if cache and fieldname in self.value_cache[doctype]:
-			return self.value_cache[doctype][fieldname]
+		if cache and str(fieldname) in self.value_cache[doctype]:
+			return self.value_cache[doctype][str(fieldname)]
 
 		val = frappe.qb.get_query(
 			table="Singles",
@@ -857,7 +871,7 @@ class Database:
 
 		val = cast_fieldtype(df.fieldtype, val)
 
-		self.value_cache[doctype][fieldname] = val
+		self.value_cache[doctype][str(fieldname)] = val
 
 		return val
 
@@ -936,7 +950,7 @@ class Database:
 		self,
 		dt,
 		dn,
-		field,
+		field: StringableOrDict,
 		val=None,
 		modified=None,
 		modified_by=None,
