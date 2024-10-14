@@ -28,6 +28,7 @@ from frappe.database.utils import (
 	is_query_type,
 )
 from frappe.exceptions import DoesNotExistError, ImplicitCommitError
+from frappe.model.document import DocRef
 from frappe.monitor import get_trace_id
 from frappe.query_builder.functions import Count
 from frappe.utils import CallbackManager, cint, get_datetime, get_table_name, getdate, now, sbool
@@ -591,8 +592,11 @@ class Database:
 		        user = frappe.db.get_values("User", "test@example.com", "*")[0]
 		"""
 		out = None
-		if cache and isinstance(filters, str) and (doctype, filters, fieldname) in self.value_cache:
-			return self.value_cache[(doctype, filters, fieldname)]
+		cache_key = None
+		if cache and isinstance(filters, str | DocRef):
+			cache_key = (doctype, str(filters), fieldname)
+			if cache_key in self.value_cache:
+				return self.value_cache[cache_key]
 
 		if distinct:
 			order_by = None
@@ -660,8 +664,8 @@ class Database:
 					fields, filters, doctype, as_dict, debug, update, run=run, pluck=pluck, distinct=distinct
 				)
 
-		if cache and isinstance(filters, str):
-			self.value_cache[(doctype, filters, fieldname)] = out
+		if cache and cache_key:
+			self.value_cache[cache_key] = out
 
 		return out
 
@@ -835,8 +839,8 @@ class Database:
 		if doctype not in self.value_cache:
 			self.value_cache[doctype] = {}
 
-		if cache and fieldname in self.value_cache[doctype]:
-			return self.value_cache[doctype][fieldname]
+		if cache and str(fieldname) in self.value_cache[doctype]:
+			return self.value_cache[doctype][str(fieldname)]
 
 		val = frappe.qb.get_query(
 			table="Singles",
@@ -856,7 +860,7 @@ class Database:
 
 		val = cast_fieldtype(df.fieldtype, val)
 
-		self.value_cache[doctype][fieldname] = val
+		self.value_cache[doctype][str(fieldname)] = val
 
 		return val
 

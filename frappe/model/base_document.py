@@ -365,14 +365,16 @@ class BaseDocument:
 	def get_valid_dict(
 		self, sanitize=True, convert_dates_to_str=False, ignore_nulls=False, ignore_virtual=False
 	) -> _dict:
+		from frappe.model.document import DocRef
+
 		d = _dict()
 		field_values = self.__dict__
 
 		for fieldname in self.meta.get_valid_fields():
-			value = field_values.get(fieldname)
+			_value = field_values.get(fieldname)
 
 			# if no need for sanitization and value is None, continue
-			if not sanitize and value is None:
+			if not sanitize and _value is None:
 				d[fieldname] = None
 				continue
 
@@ -385,53 +387,56 @@ class BaseDocument:
 						continue
 
 					if (prop := getattr(type(self), fieldname, None)) and is_a_property(prop):
-						value = getattr(self, fieldname)
+						_value = getattr(self, fieldname)
 
 					elif options := getattr(df, "options", None):
 						from frappe.utils.safe_exec import get_safe_globals
 
-						value = frappe.safe_eval(
+						_value = frappe.safe_eval(
 							code=options,
 							eval_globals=get_safe_globals(),
 							eval_locals={"doc": self},
 						)
 
-				if isinstance(value, list) and df.fieldtype not in table_fields:
+				if isinstance(_value, list) and df.fieldtype not in table_fields:
 					frappe.throw(_("Value for {0} cannot be a list").format(_(df.label, context=df.parent)))
 
 				if df.fieldtype == "Check":
-					value = 1 if cint(value) else 0
+					_value = 1 if cint(_value) else 0
 
-				elif df.fieldtype == "Int" and not isinstance(value, int):
-					value = cint(value)
+				elif df.fieldtype == "Int" and not isinstance(_value, int):
+					_value = cint(_value)
 
-				elif df.fieldtype == "JSON" and isinstance(value, dict):
-					value = json.dumps(value, separators=(",", ":"))
+				elif df.fieldtype == "JSON" and isinstance(_value, dict):
+					_value = json.dumps(_value, separators=(",", ":"))
 
-				elif df.fieldtype in float_like_fields and not isinstance(value, float):
-					value = flt(value)
+				elif df.fieldtype in float_like_fields and not isinstance(_value, float):
+					_value = flt(_value)
 
-				elif (df.fieldtype in datetime_fields and value == "") or (
-					getattr(df, "unique", False) and cstr(value).strip() == ""
+				elif (df.fieldtype in datetime_fields and _value == "") or (
+					getattr(df, "unique", False) and cstr(_value).strip() == ""
 				):
-					value = None
+					_value = None
 
 			if convert_dates_to_str and isinstance(
-				value, datetime.datetime | datetime.date | datetime.time | datetime.timedelta
+				_value, datetime.datetime | datetime.date | datetime.time | datetime.timedelta
 			):
-				value = str(value)
+				_value = str(_value)
 
-			if ignore_nulls and not is_virtual_field and value is None:
+			if ignore_nulls and not is_virtual_field and _value is None:
 				continue
 
 			# If the docfield is not nullable - set a default non-null value
-			if value is None and getattr(df, "not_nullable", False):
+			if _value is None and getattr(df, "not_nullable", False):
 				if df.default:
-					value = df.default
+					_value = df.default
 				else:
-					value = get_not_null_defaults(df.fieldtype)
+					_value = get_not_null_defaults(df.fieldtype)
 
-			d[fieldname] = value
+			if isinstance(_value, DocRef):
+				_value = str(_value)
+
+			d[fieldname] = _value
 
 		return d
 
